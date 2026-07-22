@@ -11,8 +11,9 @@
   <script>
     window.$docsify = {
       name: 'Docsify 文档',
-      repo: '',
-      loadSidebar: true,
+      repo: 'qingdog/docsify-site',
+      // 不再加载 _sidebar.md，改为插件动态生成
+      loadSidebar: false,
       subMaxLevel: 3,
       search: {
         maxAge: 86400000,
@@ -20,10 +21,217 @@
         placeholder: '搜索...',
         noData: '没有找到结果',
         depth: 3
+      },
+      // ====== 自动侧边栏配置 ======
+      autoSidebar: {
+        // GitHub 仓库信息（用于 API 获取文件列表）
+        owner: 'qingdog',
+        repo: 'docsify-site',
+        // md 文件所在目录路径（仓库内路径）
+        path: 'docs',
+        // 分支
+        branch: 'main',
+        // README.md 显示名称
+        homeTitle: '首页',
+        // 排序优先级（排在前面的）
+        order: ['README.md', 'guide.md', 'features.md'],
+        // 排除的文件
+        exclude: ['DEPLOY.md']
       }
-    }
+    };
   </script>
   <script src="//cdn.jsdelivr.net/npm/docsify/lib/docsify.min.js"></script>
   <script src="//cdn.jsdelivr.net/npm/docsify/lib/plugins/search.min.js"></script>
+  <script>
+    /**
+     * Docsify 自动侧边栏插件
+     *
+     * 原理：
+     * 1. 页面加载时通过 GitHub Contents API 获取仓库 docs/ 目录下所有文件
+     * 2. 筛选出 .md 文件（排除下划线开头和配置中排除的文件）
+     * 3. 逐个 fetch md 文件内容，提取第一个 # 标题作为显示名
+     * 4. 动态生成侧边栏 HTML 注入到页面
+     *
+     * 好处：新增 md 文件只需推送到仓库，侧边栏自动更新，零维护
+     */
+    (function () {
+      const CONFIG = (window.$docsify && window.$docsify.autoSidebar) || {};
+
+      // 获取文件列表
+      async function fetchFileList() {
+        const apiURL = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/contents/${CONFIG.path}?ref=${CONFIG.branch}`;
+        const resp = await fetch(apiURL);
+        if (!resp.ok) throw new Error('GitHub API 请求失败: ' + resp.status);
+        const data = await resp.json();
+        // 筛选 md 文件
+        const exclude = new Set(CONFIG.exclude || []);
+        return data
+          .filter(item => item.type === 'file' && item.name.endsWith('.md'))
+          .filter(item => !item.name.startsWith('_'))
+          .filter(item => !exclude.has(item.name))
+          .map(item => item.name);
+      }
+
+      // 从 md 内容中提取第一个 # 标题
+      function extractTitle(markdown) {
+        const lines = markdown.split('\n');
+        for (const line of lines) {
+          const match = line.match(/^#\s+(.+)/);
+          if (match) return match[1].trim();
+        }
+        return null;
+      }
+
+      // 获取 md 文件的标题（fetch 文件内容并提取）
+      async function fetchTitle(filename) {
+        // 对于 README.md，直接返回配置的标题
+        if (filename === 'README.md') return CONFIG.homeTitle || '首页';
+
+        const rawURL = `https://raw.githubusercontent.com/${CONFIG.owner}/${CONFIG.repo}/${CONFIG.branch}/${CONFIG.path}/${filename}`;
+        try {
+          const resp = await fetch(rawURL);
+          if (!resp.ok) return filename.replace('.md', '');
+          const text = await resp.text();
+          return extractTitle(text) || filename.replace('.md', '');
+        } catch (e) {
+          return filename.replace('.md', '');
+        }
+      }
+
+      // 排序：按配置的 order 优先排列，其余按字母序
+      function sortFiles(files) {
+        const order = CONFIG.order || [];
+        return files.sort((a, b) => {
+          const ia = order.indexOf(a);
+          const ib = order.indexOf(b);
+          if (ia !== -1 && ib !== -1) return ia - ib;
+          if (ia !== -1) return -1;
+          if (ib !== -1) return 1;
+          return a.localeCompare(b);
+        });
+      }
+
+      // 生成侧边栏 HTML
+      function buildSidebarHTML(files, titles) {
+        const items = files.map((f, i) => {
+          const title = titles[i];
+          const link = f === 'README.md' ? '#' : '#' + f.replace('.md', '');
+          return `<li><a class="section-link" href="${link}" title="${title}">${title}</a></li>`;
+        });
+        return `<ul class="app-sub-sidebar">${items.join('')}</ul>`;
+      }
+
+      // 插件主函数
+      const autoSidebarPlugin = function (hook, vm) {
+        hook.ready(function () {
+          // 在侧边栏区域显示加载中
+          const sidebar = Docsify.dom.find('aside.sidebar');
+          if (sidebar) {
+            const nav = sidebar.querySelector('.app-nav') || document.createElement('nav');
+            nav.className = 'app-nav';
+            nav.innerHTML = '<p style="padding:0 15px;color:#999;">加载侧边栏...</p>';
+            if (!sidebar.querySelector('.app-nav')) {
+              sidebar.appendChild(nav);
+            }
+          }
+        });
+
+        hook.doneEach(function () {
+          fetchFileList().then(files => {
+            const sorted = sortFiles(files);
+            // 并行获取所有文件标题
+            return Promise.all(sorted.map(f => fetchTitle(f))).then(titles => {
+              return { files: sorted, titles };
+            });
+          }).then(({ files, titles }) => {
+            const html = buildSidebarHTML(files, titles);
+            const sidebar = Docsify.dom.find('aside.sidebar');
+            if (sidebar) {
+              let nav = sidebar.querySelector('.app-nav');
+              if (!nav) {
+                nav = document.createElement('nav');
+                nav.className = 'app-nav';
+                sidebar.appendChild(nav);
+              }
+              nav.innerHTML = html;
+
+              // 高亮当前页面
+              const currentPath = vm.route.path;
+              const links = nav.querySelectorAll('a');
+              links.forEach(link => {
+                const href = link.getAttribute('href').replace('#', '');
+                const currentFile = currentPath === '/' || currentPath === '' ? '' : currentPath;
+                if (href === currentFile ||
+                    (href === '' && (currentPath === '/' || currentPath === '')) ||
+                    (href && currentPath.endsWith(href))) {
+                  link.classList.add('active');
+                }
+              });
+            }
+          }).catch(err => {
+            console.error('[auto-sidebar] 生成侧边栏失败:', err);
+            const sidebar = Docsify.dom.find('aside.sidebar');
+            if (sidebar) {
+              let nav = sidebar.querySelector('.app-nav');
+              if (!nav) {
+                nav = document.createElement('nav');
+                nav.className = 'app-nav';
+                sidebar.appendChild(nav);
+              }
+              nav.innerHTML = `<p style="padding:0 15px;color:#e74c3c;">侧边栏加载失败<br><small>${err.message}</small></p>`;
+            }
+          });
+        });
+      };
+
+      // 注册插件
+      if (window.$docsify) {
+        const originalPlugins = window.$docsify.plugins || [];
+        originalPlugins.push(autoSidebarPlugin);
+        window.$docsify.plugins = originalPlugins;
+      }
+    })();
+  </script>
+  <style>
+    /* 侧边栏自动生成导航样式 */
+    .app-nav {
+      position: absolute;
+      top: 80px;
+      left: 0;
+      right: 0;
+      z-index: 10;
+    }
+    .app-sub-sidebar {
+      margin: 0;
+      padding: 0 0 0 15px;
+      list-style: none;
+    }
+    .app-sub-sidebar li {
+      margin: 0;
+    }
+    .app-sub-sidebar a {
+      display: block;
+      padding: 6px 15px 6px 20px;
+      color: #364149;
+      text-decoration: none;
+      font-size: 14px;
+      border-left: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    .app-sub-sidebar a:hover {
+      color: #42b983;
+      border-left-color: #42b983;
+    }
+    .app-sub-sidebar a.active {
+      color: #42b983;
+      font-weight: 600;
+      border-left-color: #42b983;
+      background: rgba(66, 185, 131, 0.08);
+    }
+    /* 确保 sidebar 有足够上边距 */
+    .sidebar-nav {
+      margin-top: 120px;
+    }
+  </style>
 </body>
 </html>
