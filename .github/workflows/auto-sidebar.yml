@@ -1,0 +1,84 @@
+name: 自动生成侧边栏
+
+on:
+  push:
+    paths:
+      - 'docs/**/*.md'
+      - 'docs/*.md'
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  generate-sidebar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成 _sidebar.md
+        run: |
+          python3 - << 'PYTHON'
+          import os, re
+
+          DOCS_DIR = 'docs'
+          OUTPUT = os.path.join(DOCS_DIR, '_sidebar.md')
+
+          def extract_title(filepath):
+              with open(filepath, 'r', encoding='utf-8') as f:
+                  for line in f:
+                      m = re.match(r'^#\s+(.+)$', line.strip())
+                      if m:
+                          return m.group(1).strip()
+              return None
+
+          # 收集 md 文件
+          EXCLUDE = {'_sidebar.md', '_coverpage.md', 'DEPLOY.md'}
+          PRIORITY = ['README.md', 'guide.md', 'features.md']
+
+          md_files = []
+          for fname in os.listdir(DOCS_DIR):
+              if not fname.endswith('.md'):
+                  continue
+              if fname.startswith('_') or fname in EXCLUDE:
+                  continue
+              md_files.append(fname)
+
+          md_files.sort(key=lambda f: (0, PRIORITY.index(f)) if f in PRIORITY else (1, f))
+
+          lines = []
+          for fname in md_files:
+              fpath = os.path.join(DOCS_DIR, fname)
+              title = extract_title(fpath)
+              if fname == 'README.md':
+                  display = '首页'
+                  link = '/'
+              else:
+                  display = title if title else fname.replace('.md', '')
+                  link = fname
+              lines.append(f'- [{display}]({link})')
+
+          content = '\n'.join(lines) + '\n'
+
+          with open(OUTPUT, 'w', encoding='utf-8') as f:
+              f.write(content)
+
+          print('✅ 生成 _sidebar.md:')
+          print(content)
+          PYTHON
+
+      - name: 提交变更
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/_sidebar.md
+          if git diff --cached --quiet; then
+            echo "没有变更，跳过提交"
+          else
+            git commit -m "ci: 自动更新 _sidebar.md"
+            git push
+          fi
