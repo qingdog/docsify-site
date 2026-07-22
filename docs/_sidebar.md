@@ -1,3 +1,4 @@
 - [首页](/)
 - [技术指南](guide.md)
 - [功能特性](features.md)
+- [高级进阶](advanced.md)
