@@ -1,4 +1,4 @@
-name: 自动生成侧边栏
+name: 自动生成sidebar.md和git提交推送
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 运行脚本生成 _sidebar.md
-        run: python3 scripts/gen_sidebar.py
+        run: python3  gen_docs_sidebar_md.py
 
       - name: 提交变更
         run: |
